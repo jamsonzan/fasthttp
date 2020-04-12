@@ -230,12 +230,6 @@ func (wp *workerPool) workerFunc(ch *workerChan) {
 				wp.Logger.Printf("error when serving connection %q<->%q: %s", c.LocalAddr(), c.RemoteAddr(), err)
 			}
 		}
-		if err == errHijacked {
-			wp.connState(c, StateHijacked)
-		} else {
-			_ = c.Close()
-			wp.connState(c, StateClosed)
-		}
 		c = nil
 
 		if !wp.release(ch) {

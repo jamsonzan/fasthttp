@@ -1621,6 +1621,10 @@ func (s *Server) Serve(ln net.Listener) error {
 	}
 	wp.Start()
 
+	if err := initEpoller(wp); err != nil {
+		return err
+	}
+
 	// Count our waiting to accept a connection as an open connection.
 	// This way we can't get into any weird state where just after accepting
 	// a connection Shutdown is called which reads open as 0 because it isn't
@@ -1919,6 +1923,8 @@ func (s *Server) serveConn(c net.Conn) (err error) {
 		isHTTP11        bool
 
 		reqReset bool
+
+		nextRoundTrip bool
 	)
 	for {
 		connRequestNum++
@@ -2180,6 +2186,20 @@ func (s *Server) serveConn(c net.Conn) (err error) {
 			err = nil
 			break
 		}
+		//  is not pipeline
+		if br == nil || br.Buffered() == 0 {
+			log.Printf("finish a roundtrip")
+			_ = epoller.Add(c)
+			nextRoundTrip = true
+			break
+		}
+	}
+
+	if err == errHijacked {
+		s.setState(c, StateHijacked)
+	} else if err != nil && !nextRoundTrip {
+		_ = c.Close()
+		s.setState(c, StateClosed)
 	}
 
 	if br != nil {

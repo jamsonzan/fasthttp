@@ -1923,6 +1923,8 @@ func (s *Server) serveConn(c net.Conn) (err error) {
 		isHTTP11        bool
 
 		reqReset bool
+
+		nextRoundTrip bool
 	)
 	for {
 		connRequestNum++
@@ -2140,8 +2142,6 @@ func (s *Server) serveConn(c net.Conn) (err error) {
 				}
 			}
 			if connectionClose {
-				_ = c.Close()
-				s.setState(c, StateClosed)
 				break
 			}
 			if s.ReduceMemoryUsage && hijackHandler == nil {
@@ -2151,7 +2151,6 @@ func (s *Server) serveConn(c net.Conn) (err error) {
 		}
 
 		if hijackHandler != nil {
-			s.setState(c, StateHijacked)
 			var hjr io.Reader = c
 			if br != nil {
 				hjr = br
@@ -2191,8 +2190,16 @@ func (s *Server) serveConn(c net.Conn) (err error) {
 		if br == nil || br.Buffered() == 0 {
 			log.Printf("finish a roundtrip")
 			_ = epoller.Add(c)
+			nextRoundTrip = true
 			break
 		}
+	}
+
+	if err == errHijacked {
+		s.setState(c, StateHijacked)
+	} else if err != nil && !nextRoundTrip {
+		_ = c.Close()
+		s.setState(c, StateClosed)
 	}
 
 	if br != nil {

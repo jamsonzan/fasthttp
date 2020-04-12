@@ -13,6 +13,17 @@ import (
 
 var epoller *epoll
 
+type epoll struct {
+	fd          int
+	connections map[int]*wrapStateConn
+	lock        *sync.RWMutex
+}
+
+type wrapStateConn struct {
+	net.Conn
+	poll        bool
+}
+
 func initEpoller(wp *workerPool) error {
 	var err error
 	epoller, err = MkEpoll()
@@ -23,12 +34,6 @@ func initEpoller(wp *workerPool) error {
 	return nil
 }
 
-type epoll struct {
-	fd          int
-	connections map[int]net.Conn
-	lock        *sync.RWMutex
-}
-
 func MkEpoll() (*epoll, error) {
 	fd, err := unix.EpollCreate1(0)
 	if err != nil {
@@ -37,24 +42,32 @@ func MkEpoll() (*epoll, error) {
 	return &epoll{
 		fd:          fd,
 		lock:        &sync.RWMutex{},
-		connections: make(map[int]net.Conn),
+		connections: make(map[int]*wrapStateConn),
 	}, nil
 }
 
 func (e *epoll) Add(conn net.Conn) error {
-	// Extract file descriptor associated with the connection
 	fd := tcpFD(conn)
-	event := &unix.EpollEvent{Events: unix.POLLIN | unix.POLLHUP | unix.EPOLLET |unix.EPOLLERR, Fd: int32(fd)}
-	err := unix.EpollCtl(e.fd, syscall.EPOLL_CTL_ADD, fd, event)
-	if err != nil {
-		return err
-	}
-	log.Printf("Success to add conn %s with fd %d", conn.RemoteAddr().String(), fd)
+
 	e.lock.Lock()
 	defer e.lock.Unlock()
-	e.connections[fd] = conn
-	if len(e.connections)%100 == 0 {
-		log.Printf("Total number of connections: %v", len(e.connections))
+	c, ok := e.connections[fd]
+
+	if !ok {
+		// Extract file descriptor associated with the connection
+		event := &unix.EpollEvent{Events: unix.POLLIN | unix.POLLHUP |unix.EPOLLERR, Fd: int32(fd)}
+		err := unix.EpollCtl(e.fd, syscall.EPOLL_CTL_ADD, fd, event)
+		if err != nil {
+			return err
+		}
+		log.Printf("Success to add conn %s with fd %d", conn.RemoteAddr().String(), fd)
+		e.connections[fd] = &wrapStateConn{Conn: conn, poll: true}
+		if len(e.connections)%100 == 0 {
+			log.Printf("Total number of connections: %v", len(e.connections))
+		}
+	} else {
+		c.poll = true
+		log.Printf("Success to add conn %s with fd %d", conn.RemoteAddr().String(), fd)
 	}
 	return nil
 }
@@ -76,8 +89,8 @@ func (e *epoll) Remove(conn net.Conn) error {
 }
 
 func (e *epoll) Wait() ([]net.Conn, error) {
-	events := make([]unix.EpollEvent, 100)
-	n, err := unix.EpollWait(e.fd, events, 100)
+	events := make([]unix.EpollEvent, 512)
+	n, err := unix.EpollWait(e.fd, events, 512)
 	if err != nil {
 		return nil, err
 	}
@@ -86,17 +99,12 @@ func (e *epoll) Wait() ([]net.Conn, error) {
 	var connections []net.Conn
 	for i := 0; i < n; i++ {
 		conn := e.connections[int(events[i].Fd)]
-		connections = append(connections, conn)
+		if conn.poll {
+			connections = append(connections, conn.Conn)
+			conn.poll = false
+		}
 	}
 	return connections, nil
-}
-
-func tcpFD(conn net.Conn) int {
-	tcpConn := reflect.Indirect(reflect.ValueOf(conn)).FieldByName("conn")
-	fdVal := tcpConn.FieldByName("fd")
-	pfdVal := reflect.Indirect(fdVal).FieldByName("pfd")
-
-	return int(pfdVal.FieldByName("Sysfd").Int())
 }
 
 func poll(wp *workerPool) {
@@ -117,4 +125,12 @@ func poll(wp *workerPool) {
 			}
 		}
 	}
+}
+
+func tcpFD(conn net.Conn) int {
+	tcpConn := reflect.Indirect(reflect.ValueOf(conn)).FieldByName("conn")
+	fdVal := tcpConn.FieldByName("fd")
+	pfdVal := reflect.Indirect(fdVal).FieldByName("pfd")
+
+	return int(pfdVal.FieldByName("Sysfd").Int())
 }

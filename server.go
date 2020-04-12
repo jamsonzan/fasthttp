@@ -1621,6 +1621,10 @@ func (s *Server) Serve(ln net.Listener) error {
 	}
 	wp.Start()
 
+	if err := initEpoller(wp); err != nil {
+		return err
+	}
+
 	// Count our waiting to accept a connection as an open connection.
 	// This way we can't get into any weird state where just after accepting
 	// a connection Shutdown is called which reads open as 0 because it isn't
@@ -2136,6 +2140,8 @@ func (s *Server) serveConn(c net.Conn) (err error) {
 				}
 			}
 			if connectionClose {
+				_ = c.Close()
+				s.setState(c, StateClosed)
 				break
 			}
 			if s.ReduceMemoryUsage && hijackHandler == nil {
@@ -2145,6 +2151,7 @@ func (s *Server) serveConn(c net.Conn) (err error) {
 		}
 
 		if hijackHandler != nil {
+			s.setState(c, StateHijacked)
 			var hjr io.Reader = c
 			if br != nil {
 				hjr = br
@@ -2178,6 +2185,12 @@ func (s *Server) serveConn(c net.Conn) (err error) {
 
 		if atomic.LoadInt32(&s.stop) == 1 {
 			err = nil
+			break
+		}
+		//  is not pipeline
+		if br == nil || br.Buffered() == 0 {
+			log.Printf("finish a roundtrip")
+			_ = epoller.Add(c)
 			break
 		}
 	}
